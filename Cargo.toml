@@ -11,6 +11,7 @@ http-service = ["dep:axum", "dep:tower-http", "tower-http/trace"]
 logging = ["dep:tracing-subscriber"]
 
 [dependencies]
+paste = "1"
 anyhow = "1"
 thiserror = "1"
 serde = { version = "1", features = ["derive"] }

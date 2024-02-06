@@ -87,6 +87,15 @@ impl JobHandle {
         self.operation_tx.send(Operation::Kill).await.is_ok()
     }
 
+    pub async fn get_pid(&self) -> Option<u32> {
+        let (tx, rx) = oneshot::channel();
+
+        if self.operation_tx.send(Operation::GetPid(tx)).await.is_err() {
+            return None;
+        }
+        rx.await.unwrap_or(None)
+    }
+
     pub async fn get_stdout(&self) -> Vec<u8> {
         self.stdout_buf.get_buffer().await
     }

@@ -1,4 +1,5 @@
 mod builder;
+mod error;
 mod routes;
 mod state;
 
@@ -25,6 +26,10 @@ async fn make_tcp_listener() -> io::Result<(TcpListener, String)> {
     Ok((TcpListener::bind(addr).await?, addr.to_owned()))
 }
 
+async fn fallback_handler() -> error::Result<()> {
+    error::Error::api_not_found().into()
+}
+
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("unable to create TcpListener: {0:?}")]
@@ -48,19 +53,22 @@ impl Service {
             job_manager: builder.job_manager,
         });
 
-        let router = routes::mount_routes(Router::new()).with_state(state).layer(
-            TraceLayer::new_for_http()
-                .make_span_with(|req: &Request<_>| {
-                    info_span!(
-                        "http_request",
-                        uri = ?req.uri(),
-                        method = ?req.method()
-                    )
-                })
-                .on_request(|_req: &Request<_>, span: &Span| {
-                    info!(parent: span, "received a request");
-                }),
-        );
+        let router = routes::mount_routes(Router::new())
+            .fallback(fallback_handler)
+            .with_state(state)
+            .layer(
+                TraceLayer::new_for_http()
+                    .make_span_with(|req: &Request<_>| {
+                        info_span!(
+                            "http_request",
+                            uri = ?req.uri(),
+                            method = ?req.method()
+                        )
+                    })
+                    .on_request(|_req: &Request<_>, span: &Span| {
+                        info!(parent: span, "received a request");
+                    }),
+            );
 
         Ok(Self {
             fut: Box::pin(async move {
