@@ -19,19 +19,20 @@ pub(super) enum Operation {
 impl Operation {
     pub async fn perform_with_child(self, child: &mut Child) {
         match self {
-            Operation::Stop => {
+            Operation::Stop | Operation::Kill => {
                 let Some(pid) = child.id() else {
                     warn!("process has exited");
                     return;
                 };
                 let pid = Pid::from_raw(pid as _);
-                if let Err(err) = signal::killpg(pid, signal::SIGINT) {
-                    error!("failed to send SIGINT to the process group: {err:?}");
-                }
-            }
-            Operation::Kill => {
-                if let Err(err) = child.start_kill() {
-                    error!("failed to kill the process: {err:?}");
+                let signal = if matches!(self, Operation::Stop) {
+                    signal::SIGINT
+                } else {
+                    signal::SIGKILL
+                };
+                debug!("sending {signal} to pgid {pid}");
+                if let Err(err) = signal::killpg(pid, signal) {
+                    error!("failed to send {signal} to the process group: {err:?}");
                 }
             }
             Operation::GetPid(tx) => {
@@ -45,6 +46,7 @@ impl Operation {
 
 #[derive(Clone)]
 pub struct JobHandle {
+    job_id: u64,
     operation_tx: mpsc::Sender<Operation>,
     exit_status_rx: watch::Receiver<Option<io::Result<ExitStatus>>>,
     pub(super) stdout_buf: Arc<StdoutBuffer>,
@@ -53,10 +55,12 @@ pub struct JobHandle {
 impl JobHandle {
     #[inline]
     pub(super) fn new(
+        job_id: u64,
         operation_tx: mpsc::Sender<Operation>,
         exit_status_rx: watch::Receiver<Option<io::Result<ExitStatus>>>,
     ) -> Self {
         Self {
+            job_id,
             operation_tx,
             exit_status_rx,
             stdout_buf: Default::default(),
@@ -65,6 +69,11 @@ impl JobHandle {
 }
 
 impl JobHandle {
+    #[inline]
+    pub fn job_id(&self) -> u64 {
+        self.job_id
+    }
+
     /// Sends `SIGINT` signal to the process group of the job to
     /// simulate Ctrl-C action, and returns whether the request is
     /// successfully sent.

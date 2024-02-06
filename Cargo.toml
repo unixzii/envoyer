@@ -28,8 +28,8 @@ optional = true
 features = ["fmt", "env-filter"]
 
 [dependencies.tokio]
-version = "1.35"
-features = ["rt", "macros", "time", "process"]
+version = "1.36"
+features = ["rt", "macros", "time", "process", "net"]
 
 [[bin]]
 name = "envoyer"

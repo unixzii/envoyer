@@ -1,15 +1,21 @@
 use std::io;
+use std::os::fd::{FromRawFd, IntoRawFd};
 use std::process::Stdio;
 use std::sync::Arc;
 
 use home::home_dir;
 use nix::unistd::{self, Pid};
 use tokio::io::AsyncWriteExt;
+use tokio::net::unix::pipe;
 use tokio::process::{Child as ChildProcess, Command};
 
 #[derive(Clone, Debug)]
 enum JobType {
     Script(Arc<str>),
+}
+
+struct SpawnContext {
+    stdio_pipe: Option<pipe::Sender>,
 }
 
 #[derive(Clone, Debug)]
@@ -32,20 +38,40 @@ impl JobDescriptor {
     /// # Panics
     ///
     /// Panics if called from **outside** of the async context.
-    pub(super) fn create_process(&self) -> io::Result<ChildProcess> {
-        match &self.job_type {
-            JobType::Script(script) => self.create_script_process(script),
-        }
+    pub(super) fn create_process(&self) -> io::Result<(ChildProcess, pipe::Receiver)> {
+        let (pipe_tx, pipe_rx) = pipe::pipe()?;
+
+        let mut cx = SpawnContext {
+            stdio_pipe: Some(pipe_tx),
+        };
+        let child = match &self.job_type {
+            JobType::Script(script) => Self::create_script_process(script, &mut cx),
+        }?;
+
+        Ok((child, pipe_rx))
     }
 
-    fn decorate_command<'a>(&self, cmd: &'a mut Command) -> &'a mut Command {
+    fn decorate_command<'a>(
+        cmd: &'a mut Command,
+        cx: &mut SpawnContext,
+    ) -> io::Result<&'a mut Command> {
         if let Some(home_dir) = home_dir() {
             cmd.current_dir(home_dir);
         } else {
             warn!("failed to get the home dir");
         }
-        cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::null());
+
+        let pipe_raw_fd = cx
+            .stdio_pipe
+            .take()
+            .expect("expected an opened pipe")
+            .into_blocking_fd()?
+            .into_raw_fd();
+        // SAFETY: This redirects stdio to a valid file descriptor.
+        unsafe {
+            cmd.stdout(Stdio::from_raw_fd(pipe_raw_fd));
+            cmd.stderr(Stdio::from_raw_fd(pipe_raw_fd));
+        }
 
         // SAFETY: This is executed in the child process to set the
         // process group of it.
@@ -56,13 +82,12 @@ impl JobDescriptor {
             });
         }
 
-        cmd
+        Ok(cmd)
     }
 
-    fn create_script_process(&self, script: &Arc<str>) -> io::Result<ChildProcess> {
+    fn create_script_process(script: &Arc<str>, cx: &mut SpawnContext) -> io::Result<ChildProcess> {
         let mut cmd = Command::new("sh");
-        let mut child = self
-            .decorate_command(&mut cmd)
+        let mut child = Self::decorate_command(&mut cmd, cx)?
             .stdin(Stdio::piped())
             .spawn()?;
 

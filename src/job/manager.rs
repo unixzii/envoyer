@@ -5,7 +5,8 @@ use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
 
 use tokio::io::AsyncReadExt;
-use tokio::process::{Child, ChildStdout};
+use tokio::net::unix::pipe;
+use tokio::process::Child;
 use tokio::sync::RwLock;
 use tokio::sync::{mpsc, watch};
 
@@ -34,27 +35,24 @@ impl JobManager {
     pub async fn create_job(&self, desc: &JobDescriptor) -> io::Result<JobHandle> {
         debug!("creating job with descriptor: {desc:?}");
 
-        let mut child = desc.create_process()?;
+        let (child, our_stdio_pipe) = desc.create_process()?;
         debug!("process spawned, pid: {:?}", child.id());
 
         let job_id = self.inner.next_job_id.fetch_add(1, AtomicOrdering::Relaxed);
-
         let (operation_tx, operation_rx) = mpsc::channel(1);
         let (exit_status_tx, exit_status_rx) = watch::channel(None);
+        let handle = JobHandle::new(job_id, operation_tx, exit_status_rx);
 
-        let handle = JobHandle::new(operation_tx, exit_status_rx);
-
-        if let Some(stdout) = child.stdout.take() {
-            spawn_feeding_stdout(job_id, stdout, Arc::clone(&handle.stdout_buf));
-        }
-
-        spawn_polling_process(
+        let poll_fut = poll_process(
             job_id,
             child,
+            our_stdio_pipe,
+            Arc::clone(&handle.stdout_buf),
             operation_rx,
             exit_status_tx,
             Arc::clone(&self.inner),
         );
+        tokio::spawn(poll_fut);
 
         let mut child_handles = self.inner.child_handles.write().await;
         assert!(child_handles.insert(job_id, handle.clone()).is_none());
@@ -75,71 +73,75 @@ impl Default for JobManager {
     }
 }
 
-fn spawn_polling_process(
+async fn poll_process(
     job_id: u64,
     mut child: Child,
+    mut stdio_pipe: pipe::Receiver,
+    buf: Arc<StdoutBuffer>,
     mut operation_rx: mpsc::Receiver<Operation>,
     exit_status_tx: watch::Sender<Option<io::Result<ExitStatus>>>,
     mgr_inner: Arc<Inner>,
 ) {
-    let fut = async move {
-        let span = debug_span!("process_polling", job_id = ?job_id);
+    let span = debug_span!("poll_process", job_id = ?job_id);
 
-        debug!(parent: &span, "start polling, current pid: {:?}", child.id());
-        loop {
-            tokio::select! {
-                exit_status = child.wait() => {
-                    debug!(parent: &span, "process exited with status: {exit_status:?}");
+    let mut stack_buf = [0u8; 512];
 
-                    // FIXME: Actually we should expect that the send will
-                    // always succeed, since we hold at least one handle
-                    // before the process exits.
-                    _ = exit_status_tx.send(Some(exit_status));
-                    break;
-                }
-                op = operation_rx.recv() => {
-                    debug!(parent: &span, "received an operation");
+    debug!(parent: &span, "start polling, current pid: {:?}", child.id());
+    loop {
+        tokio::select! {
+            read_n = stdio_pipe.read(&mut stack_buf) => {
+                match read_n {
+                    Ok(read_n) => {
+                        if read_n == 0 {
+                            debug!(parent: &span, "reached eof");
+                            break;
+                        }
 
-                    let op = op.expect("operation channel closed too early");
-                    op.perform_with_child(&mut child).await;
+                        trace!(parent: &span, "read {read_n} bytes");
+                        buf.write(&stack_buf[0..read_n]).await;
+                    },
+                    Err(err) => {
+                        if err.kind() == io::ErrorKind::Interrupted {
+                            continue;
+                        }
+                        error!(parent: &span, "error occurred: {err:?}");
+                        break;
+                    },
                 }
             }
-        }
+            op = operation_rx.recv() => {
+                debug!(parent: &span, "received an operation");
 
-        let mut child_handles = mgr_inner.child_handles.write().await;
-        child_handles
-            .remove(&job_id)
-            .expect("internal state is inconsistent");
-    };
-    tokio::spawn(fut);
-}
-
-fn spawn_feeding_stdout(job_id: u64, mut stdout: ChildStdout, buf: Arc<StdoutBuffer>) {
-    let fut = async move {
-        let span = debug_span!("stdout_feeding", job_id = ?job_id);
-
-        let mut stack_buf = [0u8; 512];
-        debug!(parent: &span, "start feeding stdout");
-        loop {
-            let read_n = match stdout.read(&mut stack_buf).await {
-                Ok(value) => value,
-                Err(err) => {
-                    if err.kind() == io::ErrorKind::Interrupted {
-                        continue;
-                    }
-                    error!(parent: &span, "error occurred: {err:?}");
-                    return;
-                }
-            };
-
-            if read_n == 0 {
-                debug!(parent: &span, "reached eof");
-                return;
+                let op = op.expect("operation channel closed too early");
+                op.perform_with_child(&mut child).await;
             }
-
-            trace!(parent: &span, "read {read_n} bytes");
-            buf.write(&stack_buf[0..read_n]).await;
         }
-    };
-    tokio::spawn(fut);
+    }
+
+    // Stdio has been closed here, but we still need to wait for the process
+    // to receive exit status and avoid zombie processes.
+    loop {
+        tokio::select! {
+            exit_status = child.wait() => {
+                debug!(parent: &span, "process exited with status: {exit_status:?}");
+
+                // We expect that the receiver will never get dropped before
+                // it receives the exit status, since we hold at least one
+                // handle until the process is cleaned up.
+                exit_status_tx.send(Some(exit_status)).expect("channel closed too early");
+                break;
+            }
+            op = operation_rx.recv() => {
+                debug!(parent: &span, "received an operation");
+
+                let op = op.expect("operation channel closed too early");
+                op.perform_with_child(&mut child).await;
+            }
+        }
+    }
+
+    let mut child_handles = mgr_inner.child_handles.write().await;
+    child_handles
+        .remove(&job_id)
+        .expect("internal state is inconsistent");
 }
