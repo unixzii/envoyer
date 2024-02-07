@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 use std::io;
+use std::mem::forget;
 use std::process::ExitStatus;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use tokio::io::AsyncReadExt;
@@ -11,15 +12,42 @@ use tokio::net::unix::pipe;
 use tokio::process::Child;
 use tokio::sync::RwLock;
 use tokio::sync::{mpsc, watch};
+use tokio::time::sleep;
 
 use super::handle::Operation;
 use super::{JobDescriptor, JobHandle, StdoutBuffer};
 
 struct Inner {
+    closed: RwLock<bool>,
     next_job_id: AtomicU64,
     job_handles: RwLock<HashMap<u64, JobHandle>>,
 }
 
+/// An job manager.
+///
+/// The manager provides a set of methods to manage jobs (e.g creating,
+/// querying, stopping, etc.).
+///
+/// # Sharing
+///
+/// The manager object is designed to be shared. Cloning the object itself
+/// will give you the same handle to the original manager.
+///
+/// `JobManager` is thread-safe, and by passing the object (or its clones)
+/// into different tasks or threads, you will able to access the manager
+/// from them.
+///
+/// # Shutdown
+///
+/// Shutting down should be explicit. When the last handle of a manager
+/// instance dropped, the manager will shutdown only if there are no jobs
+/// that are running.
+///
+/// After the manager is shutdown, other handles of the manager will not
+/// be able to start new jobs.
+///
+/// To avoid leaking processes, it's recommended to shutdown the manager
+/// explicitly before the program exits.
 #[derive(Clone)]
 pub struct JobManager {
     inner: Arc<Inner>,
@@ -28,13 +56,78 @@ pub struct JobManager {
 impl JobManager {
     pub fn new() -> Self {
         let inner = Arc::new(Inner {
+            closed: RwLock::new(false),
             next_job_id: AtomicU64::new(1),
             job_handles: Default::default(),
         });
         Self { inner }
     }
 
+    pub async fn shutdown(&self) {
+        let mut closed = self.inner.closed.write().await;
+        if *closed {
+            warn!("the job manager is already closed by other handles");
+            return;
+        }
+
+        struct DropGuard<'a> {
+            closed: &'a mut bool,
+        }
+
+        impl Drop for DropGuard<'_> {
+            fn drop(&mut self) {
+                *self.closed = true;
+            }
+        }
+
+        let _drop_guard = DropGuard {
+            closed: &mut closed,
+        };
+
+        let mut job_handles = self.inner.job_handles.write().await;
+        for (_, mut job_handle) in job_handles.drain() {
+            if job_handle.get_pid().await.is_none() {
+                continue;
+            }
+
+            let job_id = job_handle.job_id();
+
+            debug!("cleaning up job {job_id}");
+            job_handle.stop().await;
+
+            tokio::select! {
+                _ = job_handle.wait() => { continue; }
+                _ = sleep(Duration::from_secs(5)) => {
+                    warn!(
+                        "job {job_id} is not terminated in time, killing it with SIGKILL"
+                    );
+                    job_handle.kill().await;
+                }
+            }
+
+            tokio::select! {
+                _ = job_handle.wait() => { continue; }
+                _ = sleep(Duration::from_secs(5)) => {
+                    warn!("job {job_id} cannot be killed, it may be leaked");
+
+                    // Dropping all handles of an unfinished job will make the
+                    // polling task panic. We need to leak at least one handle
+                    // to avoid such situation.
+                    forget(job_handle);
+                }
+            }
+        }
+    }
+
     pub async fn create_job(&self, desc: &JobDescriptor) -> io::Result<JobHandle> {
+        let closed = self.inner.closed.read().await;
+        if *closed {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "the job manager is already closed",
+            ));
+        }
+
         debug!("creating job with descriptor: {desc:?}");
 
         let (child, our_stdio_pipe) = desc.create_process()?;
@@ -70,6 +163,7 @@ impl JobManager {
         let mut job_handles = self.inner.job_handles.write().await;
         assert!(job_handles.insert(job_id, handle.clone()).is_none());
 
+        drop(closed);
         Ok(handle)
     }
 
@@ -159,7 +253,5 @@ async fn poll_process(
     }
 
     let mut job_handles = mgr_inner.job_handles.write().await;
-    job_handles
-        .remove(&job_id)
-        .expect("internal state is inconsistent");
+    job_handles.remove(&job_id);
 }

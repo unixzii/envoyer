@@ -35,7 +35,7 @@ features = ["fmt", "env-filter"]
 
 [dependencies.tokio]
 version = "1.36"
-features = ["rt", "macros", "time", "process", "net"]
+features = ["rt", "macros", "time", "process", "signal", "net"]
 
 [[bin]]
 name = "envoyer"

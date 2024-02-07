@@ -18,9 +18,11 @@ use tokio::net::TcpListener;
 use tower_http::trace::TraceLayer;
 use tracing::Span;
 
-pub use builder::Builder;
+use crate::job::JobManager;
 use routes::RouterExt;
 use state::State;
+
+pub use builder::Builder;
 
 async fn make_tcp_listener() -> io::Result<(TcpListener, String)> {
     let addr = "0.0.0.0:8890";
@@ -39,6 +41,7 @@ pub enum Error {
 
 pin_project! {
     pub struct Service {
+        job_manager: JobManager,
         fut: BoxFuture<'static, io::Result<()>>,
     }
 }
@@ -51,7 +54,7 @@ impl Service {
         };
 
         let state = Arc::new(State {
-            job_manager: builder.job_manager,
+            job_manager: builder.job_manager.clone(),
         });
 
         let router = Router::new()
@@ -73,11 +76,20 @@ impl Service {
             );
 
         Ok(Self {
+            job_manager: builder.job_manager,
             fut: Box::pin(async move {
                 info!("http server is listening at: {addr}");
                 serve(listener, router).await
             }),
         })
+    }
+}
+
+impl Service {
+    /// Returns the [`JobManager`] used by this service.
+    #[inline]
+    pub fn job_manager(&self) -> &JobManager {
+        &self.job_manager
     }
 }
 
