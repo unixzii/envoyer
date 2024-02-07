@@ -9,7 +9,7 @@ use paste::paste;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Serialize)]
-pub(super) struct Error {
+pub struct Error {
     code: u32,
     message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -23,7 +23,7 @@ macro_rules! define_error {
     ($name:ident, $code:literal, $status:expr, $msg:literal) => {
         impl Error {
             #[inline]
-            pub(super) fn $name() -> Self {
+            pub fn $name() -> Self {
                 // Eliminate dead code warning when we use either of these two constructors.
                 paste! {
                     if false {
@@ -41,7 +41,7 @@ macro_rules! define_error {
 
             paste! {
                 #[inline]
-                pub(super) fn [<$name _with_details>]<S: Into<String>>(details: S) -> Self {
+                pub fn [<$name _with_details>]<S: Into<String>>(details: S) -> Self {
                     // Eliminate dead code warning when we use either of these two constructors.
                     if false {
                         Self::$name();
@@ -90,7 +90,7 @@ define_error!(
     "the API endpoint is not found"
 );
 
-pub(super) struct Result<T>(StdResult<T, Error>);
+pub struct Result<T>(StdResult<T, Error>);
 
 impl<T: Serialize> IntoResponse for Result<T> {
     fn into_response(self) -> Response {

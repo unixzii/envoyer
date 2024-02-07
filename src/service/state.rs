@@ -1,5 +1,5 @@
 use crate::job::JobManager;
 
-pub(super) struct State {
+pub struct State {
     pub job_manager: JobManager,
 }

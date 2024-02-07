@@ -19,6 +19,7 @@ use tower_http::trace::TraceLayer;
 use tracing::Span;
 
 pub use builder::Builder;
+use routes::RouterExt;
 use state::State;
 
 async fn make_tcp_listener() -> io::Result<(TcpListener, String)> {
@@ -53,7 +54,8 @@ impl Service {
             job_manager: builder.job_manager,
         });
 
-        let router = routes::mount_routes(Router::new())
+        let router = Router::new()
+            .mount_service_routes()
             .fallback(fallback_handler)
             .with_state(state)
             .layer(

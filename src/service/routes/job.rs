@@ -9,19 +9,16 @@ use crate::service::error::{Error, Result};
 use crate::service::State as ServiceState;
 
 #[derive(Debug, Deserialize, Serialize)]
-pub(super) struct PathParams {
+pub struct PathParams {
     job_id: u64,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-pub(super) struct CreateResponse {
+pub struct CreateResponse {
     job_id: u64,
 }
 
-pub(super) async fn create(
-    state: State<Arc<ServiceState>>,
-    contents: Bytes,
-) -> Result<CreateResponse> {
+pub async fn create(state: State<Arc<ServiceState>>, contents: Bytes) -> Result<CreateResponse> {
     let script = String::from_utf8(contents.to_vec()).map_err(|_| Error::unsupported_encoding())?;
 
     let job = state
@@ -37,11 +34,11 @@ pub(super) async fn create(
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-pub(super) struct DeleteQueries {
+pub struct DeleteQueries {
     force: Option<bool>,
 }
 
-pub(super) async fn delete(
+pub async fn delete(
     state: State<Arc<ServiceState>>,
     params: Path<PathParams>,
     queries: Query<DeleteQueries>,
@@ -65,11 +62,11 @@ pub(super) async fn delete(
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-pub(super) struct GetPidResponse {
+pub struct GetPidResponse {
     pid: u32,
 }
 
-pub(super) async fn get_pid(
+pub async fn get_pid(
     state: State<Arc<ServiceState>>,
     params: Path<PathParams>,
 ) -> Result<GetPidResponse> {

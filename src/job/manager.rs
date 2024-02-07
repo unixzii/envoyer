@@ -41,13 +41,19 @@ impl JobManager {
         let job_id = self.inner.next_job_id.fetch_add(1, AtomicOrdering::Relaxed);
         let (operation_tx, operation_rx) = mpsc::channel(1);
         let (exit_status_tx, exit_status_rx) = watch::channel(None);
-        let handle = JobHandle::new(job_id, operation_tx, exit_status_rx);
+        let stdout_buf = Default::default();
+        let handle = JobHandle::new(
+            job_id,
+            operation_tx,
+            exit_status_rx,
+            Arc::clone(&stdout_buf),
+        );
 
         let poll_fut = poll_process(
             job_id,
             child,
             our_stdio_pipe,
-            Arc::clone(&handle.stdout_buf),
+            stdout_buf,
             operation_rx,
             exit_status_tx,
             Arc::clone(&self.inner),

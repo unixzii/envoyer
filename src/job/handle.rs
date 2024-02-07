@@ -10,7 +10,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 use super::StdoutBuffer;
 
-pub(super) enum Operation {
+pub enum Operation {
     Stop,
     Kill,
     GetPid(oneshot::Sender<Option<u32>>),
@@ -49,7 +49,7 @@ pub struct JobHandle {
     job_id: u64,
     operation_tx: mpsc::Sender<Operation>,
     exit_status_rx: watch::Receiver<Option<io::Result<ExitStatus>>>,
-    pub(super) stdout_buf: Arc<StdoutBuffer>,
+    stdout_buf: Arc<StdoutBuffer>,
 }
 
 impl JobHandle {
@@ -58,12 +58,13 @@ impl JobHandle {
         job_id: u64,
         operation_tx: mpsc::Sender<Operation>,
         exit_status_rx: watch::Receiver<Option<io::Result<ExitStatus>>>,
+        stdout_buf: Arc<StdoutBuffer>,
     ) -> Self {
         Self {
             job_id,
             operation_tx,
             exit_status_rx,
-            stdout_buf: Default::default(),
+            stdout_buf,
         }
     }
 }
