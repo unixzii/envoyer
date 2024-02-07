@@ -3,7 +3,9 @@ use std::io;
 use std::process::ExitStatus;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
+use std::time::Instant;
 
+use chrono::Utc;
 use tokio::io::AsyncReadExt;
 use tokio::net::unix::pipe;
 use tokio::process::Child;
@@ -15,7 +17,7 @@ use super::{JobDescriptor, JobHandle, StdoutBuffer};
 
 struct Inner {
     next_job_id: AtomicU64,
-    child_handles: RwLock<HashMap<u64, JobHandle>>,
+    job_handles: RwLock<HashMap<u64, JobHandle>>,
 }
 
 #[derive(Clone)]
@@ -27,7 +29,7 @@ impl JobManager {
     pub fn new() -> Self {
         let inner = Arc::new(Inner {
             next_job_id: AtomicU64::new(1),
-            child_handles: Default::default(),
+            job_handles: Default::default(),
         });
         Self { inner }
     }
@@ -38,6 +40,9 @@ impl JobManager {
         let (child, our_stdio_pipe) = desc.create_process()?;
         debug!("process spawned, pid: {:?}", child.id());
 
+        let started_at = Instant::now();
+        let started_at_ts = Utc::now();
+
         let job_id = self.inner.next_job_id.fetch_add(1, AtomicOrdering::Relaxed);
         let (operation_tx, operation_rx) = mpsc::channel(1);
         let (exit_status_tx, exit_status_rx) = watch::channel(None);
@@ -47,6 +52,8 @@ impl JobManager {
             operation_tx,
             exit_status_rx,
             Arc::clone(&stdout_buf),
+            started_at,
+            started_at_ts,
         );
 
         let poll_fut = poll_process(
@@ -60,15 +67,20 @@ impl JobManager {
         );
         tokio::spawn(poll_fut);
 
-        let mut child_handles = self.inner.child_handles.write().await;
-        assert!(child_handles.insert(job_id, handle.clone()).is_none());
+        let mut job_handles = self.inner.job_handles.write().await;
+        assert!(job_handles.insert(job_id, handle.clone()).is_none());
 
         Ok(handle)
     }
 
     pub async fn get_job(&self, job_id: u64) -> Option<JobHandle> {
-        let child_handles = self.inner.child_handles.read().await;
-        child_handles.get(&job_id).cloned()
+        let job_handles = self.inner.job_handles.read().await;
+        job_handles.get(&job_id).cloned()
+    }
+
+    pub async fn get_jobs(&self) -> Vec<JobHandle> {
+        let job_handles = self.inner.job_handles.read().await;
+        job_handles.values().cloned().collect()
     }
 }
 
@@ -146,8 +158,8 @@ async fn poll_process(
         }
     }
 
-    let mut child_handles = mgr_inner.child_handles.write().await;
-    child_handles
+    let mut job_handles = mgr_inner.job_handles.write().await;
+    job_handles
         .remove(&job_id)
         .expect("internal state is inconsistent");
 }

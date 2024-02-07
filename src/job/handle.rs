@@ -2,7 +2,9 @@ use std::io;
 use std::mem::MaybeUninit;
 use std::process::ExitStatus;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
+use chrono::{DateTime, Utc};
 use nix::sys::signal;
 use nix::unistd::Pid;
 use tokio::process::Child;
@@ -50,6 +52,8 @@ pub struct JobHandle {
     operation_tx: mpsc::Sender<Operation>,
     exit_status_rx: watch::Receiver<Option<io::Result<ExitStatus>>>,
     stdout_buf: Arc<StdoutBuffer>,
+    started_at: Instant,
+    started_at_ts: DateTime<Utc>,
 }
 
 impl JobHandle {
@@ -59,12 +63,16 @@ impl JobHandle {
         operation_tx: mpsc::Sender<Operation>,
         exit_status_rx: watch::Receiver<Option<io::Result<ExitStatus>>>,
         stdout_buf: Arc<StdoutBuffer>,
+        started_at: Instant,
+        started_at_ts: DateTime<Utc>,
     ) -> Self {
         Self {
             job_id,
             operation_tx,
             exit_status_rx,
             stdout_buf,
+            started_at,
+            started_at_ts,
         }
     }
 }
@@ -73,6 +81,16 @@ impl JobHandle {
     #[inline]
     pub fn job_id(&self) -> u64 {
         self.job_id
+    }
+
+    #[inline]
+    pub fn started_at_timestamp(&self) -> DateTime<Utc> {
+        self.started_at_ts
+    }
+
+    #[inline]
+    pub fn uptime(&self) -> Duration {
+        self.started_at.elapsed()
     }
 
     /// Sends `SIGINT` signal to the process group of the job to

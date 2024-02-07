@@ -23,6 +23,11 @@ tower-http = { version = "0.5", optional = true }
 home = "0.5"
 nix = { version = "0.27", features = ["signal"] }
 
+[dependencies.chrono]
+version = "0.4"
+default-features = false
+features = ["std", "now"]
+
 [dependencies.tracing-subscriber]
 version = "0.3"
 optional = true

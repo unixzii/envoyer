@@ -4,9 +4,42 @@ use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use serde::{Deserialize, Serialize};
 
-use crate::job::JobDescriptor;
+use crate::job::{JobDescriptor, JobHandle};
 use crate::service::error::{Error, Result};
 use crate::service::State as ServiceState;
+
+mod job_entry {
+    use super::*;
+
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct JobEntry {
+        job_id: u64,
+        pid: Option<u32>,
+        uptime: Option<u64>,
+        started_at: String,
+    }
+
+    impl JobEntry {
+        pub async fn from_job(job: &JobHandle) -> Self {
+            let job_id = job.job_id();
+            let pid = job.get_pid().await;
+            let uptime = if pid.is_some() {
+                Some(job.uptime().as_millis() as _)
+            } else {
+                None
+            };
+            let started_at = job.started_at_timestamp().format("%Y-%m-%dT%H:%M:%S.%3fZ");
+            Self {
+                job_id,
+                pid,
+                uptime,
+                started_at: started_at.to_string(),
+            }
+        }
+    }
+}
+
+use job_entry::JobEntry;
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct PathParams {
@@ -31,6 +64,42 @@ pub async fn create(state: State<Arc<ServiceState>>, contents: Bytes) -> Result<
         job_id: job.job_id(),
     })
     .into()
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ListResponse {
+    jobs: Vec<JobEntry>,
+}
+
+pub async fn list(state: State<Arc<ServiceState>>) -> Result<ListResponse> {
+    let jobs = state.job_manager.get_jobs().await;
+
+    let mut job_entries = Vec::with_capacity(jobs.len());
+    for job in jobs {
+        job_entries.push(JobEntry::from_job(&job).await);
+    }
+
+    Ok(ListResponse { jobs: job_entries }).into()
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct GetResponse {
+    #[serde(flatten)]
+    job: JobEntry,
+}
+
+pub async fn get(state: State<Arc<ServiceState>>, params: Path<PathParams>) -> Result<GetResponse> {
+    let PathParams { job_id } = *params;
+
+    let handle = state
+        .job_manager
+        .get_job(job_id)
+        .await
+        .ok_or_else(Error::job_not_found)?;
+
+    let job_entry = JobEntry::from_job(&handle).await;
+
+    Ok(GetResponse { job: job_entry }).into()
 }
 
 #[derive(Debug, Deserialize, Serialize)]
